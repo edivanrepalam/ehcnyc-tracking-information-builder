@@ -173,6 +173,12 @@ button{font:inherit}
 .link-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.5fr) auto;gap:12px;align-items:end;margin-top:16px}
 .link-row .icon-btn{margin-bottom:3px}
 @media (max-width:640px){.link-row{grid-template-columns:1fr}}
+/* PNG button */
+.btn:disabled{opacity:.5;cursor:wait}
+.btn{white-space:nowrap}
+.toolbar{flex-wrap:wrap}
+.btn-png{border-color:rgba(42,142,168,.35);color:var(--accent)}
+.btn-png:hover{background:rgba(255,255,255,.85)}
 </style>
 </head>
 <body>
@@ -212,6 +218,10 @@ button{font:inherit}
       <button type="button" class="btn btn-primary" id="copyGmail">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
         Copy for Gmail
+      </button>
+      <button type="button" class="btn btn-png" id="downloadPng" title="Download the email as a PNG image (the image is also copied to your clipboard)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+        PNG
       </button>
       <button type="button" class="btn" id="copyCode" title="Copy raw HTML for n8n, GHL, etc.">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></svg>
@@ -606,6 +616,78 @@ $('#download').addEventListener('click', () => {
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 1500);
   toast('Downloaded');
+});
+
+/* ---------- PNG: download + copy the image to the clipboard ---------- */
+function saveBlob(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+}
+
+/* Email -> PNG: the email markup is drawn into an SVG foreignObject, then onto a canvas at 2x. */
+async function emailToPng(html) {
+  const W = 640;
+  const wrap = document.createElement('div');
+  wrap.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
+  wrap.style.cssText = `width:${W}px;margin:0;padding:0;font-family:${F};`;
+  wrap.innerHTML = html;
+  const probe = wrap.cloneNode(true);
+  probe.style.cssText += 'position:fixed;left:-10000px;top:0;';
+  document.body.appendChild(probe);
+  const H = Math.ceil(probe.getBoundingClientRect().height);
+  probe.remove();
+  const xml = new XMLSerializer().serializeToString(wrap);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}"><foreignObject x="0" y="0" width="${W}" height="${H}">${xml}</foreignObject></svg>`;
+  const img = new Image();
+  await new Promise((res, rej) => {
+    img.onload = res; img.onerror = () => rej(new Error('render failed'));
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  });
+  const scale = 2;
+  const cv = document.createElement('canvas');
+  cv.width = W * scale; cv.height = H * scale;
+  const ctx = cv.getContext('2d');
+  ctx.scale(scale, scale);
+  ctx.drawImage(img, 0, 0);
+  return new Promise((res, rej) => cv.toBlob(b => (b ? res(b) : rej(new Error('export failed'))), 'image/png'));
+}
+
+// Puts the PNG on the clipboard as an image (paste it straight into a chat or email). Resolves true / false, never throws.
+async function copyImage(pngPromise) {
+  if (!window.ClipboardItem || !navigator.clipboard || !navigator.clipboard.write) return false;
+  try {
+    // handing over the pending PNG keeps this inside the click, which Safari and Chrome both require
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngPromise })]);
+    return true;
+  } catch {
+    try {
+      const blob = await pngPromise;
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      return true;
+    } catch { return false; }
+  }
+}
+
+$('#downloadPng').addEventListener('click', async () => {
+  if (!guard()) return;
+  const btn = $('#downloadPng');
+  btn.disabled = true;
+  const s = readState();
+  const png = emailToPng(buildEmailBody(s));
+  png.catch(() => {});                 // handled below; keeps the clipboard attempt from raising an unhandled rejection
+  const copied = copyImage(png);       // starts now, in the click, while the image is still being drawn
+  try {
+    const blob = await png;
+    saveBlob(blob, `tracking-info-${(s.orderNo || 'draft').replace(/[^\w-]+/g, '_')}.png`);
+    toast((await copied)
+      ? 'PNG downloaded and copied to your clipboard'
+      : 'PNG downloaded. Your browser blocked copying it to the clipboard, so open the file to use it.');
+  } catch (e) {
+    toast('Could not create the PNG in this browser. Try Chrome or Edge.', true);
+  } finally { btn.disabled = false; }
 });
 
 $('#reset').addEventListener('click', () => {
